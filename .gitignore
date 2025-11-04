@@ -1,0 +1,83 @@
+# ========================================
+# Common Mechanics Lab - .gitignore
+# ========================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv/
+venv/
+env/
+build/
+dist/
+pip-wheel-metadata/
+*.log
+*.sqlite3
+
+# --- Jupyter / Notebooks ---
+.ipynb_checkpoints/
+
+# --- Scratch / TurboWarp ---
+scratch/examples/*.sb3~
+scratch/extensions/*.js~
+*.tmp
+
+# --- Firmware / ESP32 (PlatformIO, Arduino, etc.) ---
+*.bin
+*.elf
+*.hex
+*.map
+*.out
+*.o
+*.d
+*.pio/
+firmware/.pio/
+firmware/*/build/
+firmware/*/.pio/
+firmware/*/.vscode/
+
+# --- Web / Frontend ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# --- Docs / Build Artifacts ---
+docs/_build/
+docs/.DS_Store
+
+# --- OS / Editor Files ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+*.swp
+*.swo
+*.bak
+*.tmp
+*.old
+~$*
+
+# --- Docker / Containers ---
+*.pid
+*.seed
+*.pid.lock
+docker-compose.override.yml
+
+# --- Config / Secrets (add templates only) ---
+config/*.json
+config/*.yaml
+!config/wifi_template.json
+!config/devices.json
+!config/settings.yaml
+!config/users.json
+
+# --- Misc ---
+.idea/
+.vscode/
+*.iml
