@@ -35,10 +35,39 @@
     <h1>Common Mechanics Lab</h1>
     <p>Wähle eine Umgebung:</p>
 
-    <a href="/turbowrap/build-tw/editor.html?extensions=/turbowrap/extensions/esp32control.js"  arget="_blank"> TurboWarp Editor mit Extensions starten</a>
+    <a href="http://192.168.4.1:5000/turbowrap/build-tw/editor.html?extension=http://192.168.4.1:5000/turbowrap/extensions/esp32control.js"  arget="_blank"> TurboWarp Editor mit Extensions starten</a>
     <a href="/turbowrap/extensions/" target="_blank">Extensions durchsuchen</a>
     <a href="/devices" target="_blank">Netzwerkgeräte anzeigen</a>
 
     <small>Hosted on Raspberry Pi – Common Mechanics Lab</small>
+	
+<script>
+    // Host-Adresse dynamisch abrufen (z.B. 192.168.4.1 oder raspberrypi, ohne Port)
+    const host = window.location.hostname;
+    const protocol = window.location.protocol; // z.B. "http:"
+    
+    // Die Basis-URL des Hosts (ohne Port, da Port 80 verwendet wird!)
+    const baseHostUrl = protocol + '//' + host;
+    
+    // Konstante Pfade definieren
+    const editorPath = '/turbowrap/build-tw/editor.html';
+    const extensionPath = '/turbowrap/extensions/esp32control.js';
+    
+    // 1. Die vollständige Extension-URL erstellen (MUSS ABSOLUT SEIN!)
+    const absoluteExtensionUrl = baseHostUrl + extensionPath;
+    
+    // 2. Die finale URL zusammenbauen (Basis-URL + Editor-Pfad + Extension-Parameter)
+    const finalUrl = baseHostUrl + editorPath + 
+                     '?extension=' + encodeURIComponent(absoluteExtensionUrl);
+    
+    // 3. Den Link im Dokument finden und den href-Wert setzen
+    const linkElement = document.getElementById('turbo-link');
+    if (linkElement) {
+        linkElement.href = finalUrl;
+    }
+</script>
+
 </body>
+
+
 </html>
