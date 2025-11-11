@@ -3,45 +3,40 @@
   ESP32 Servo Steuerung über Weboberfläche und Websocket
 
   Dieser Sketch realisiert eine drahtlose Steuerung von RC-Servos usw. über WLAN.
-  Der ESP32 fungiert dabei sowohl als Access Point als auch als WLAN-Client
+  Der ESP32 fungiert dabei als auch als WLAN-Client im raspi-Netzwerk oder falls nicht erreichbar als Access Point
   und stellt eine einfache Weboberfläche zur Verfügung.
 
-  Hauptfunktionen:
-  - Steuerung von 9 Servos über Slider in der Weboberfläche
-  - 3 LEDS über Slider in der Weboberfläche
-  - Umschaltbar auf Poti-Steuerung (ein Poti kontrolliert alle Servos + LEDs)
-  - Einstellbarer Low-Pass-Filter für sanfte Bewegungen
-  - Auslesen und Anzeigen von:
-    * 4 Potentiometern (analog)
-    * 3 Touch-Pins (kapazitiv)
-    * 1 Schalter (mit internem Pull-Up)
-  - Soundausgabe über einen Piezo-Buzzer mit konfigurierbarer Tonfolge:
-    * Eingabeformat über Web: "frequenz,lautstärke,dauer;..."
-    * Beispiel: "1000,80,200;800,60,300;"
-    * Nicht-blockierende Wiedergabe im loop()
-  - Schalter löst (bei aktivierter Poti-Steuerung) automatisches Abspielen    einer vorgegebenen Tonfolge aus
+ Erstes uploaden (speicher leer):
+ - zufälliger Name wird generiert und gespeichert
+ - zufällige lokale MAC wird generiert und gespeichert
+
+ Basis funktionen:
   - Speicherung von WLAN-Zugangsdaten im EEPROM
   - Verbindung zu bekanntem WLAN + fallback Access Point
   - Anzeige von WLAN-Status, IP-Adresse und ESP-ID
   - WebSocket-Kommunikation für sofortige Reaktion auf Nutzerinteraktionen
   - MDNS-Unterstützung: Zugriff über http://esp-xxxx.local möglich
-
-  - Bei potiControl=true Verknüpfung der Eingabe mit LEDs und Servos
-    - 3 potis mit 3 servos
-    - 2 touch mit 2 servos
-    - 1 touch mit 3 leds
-    - schalter mit sound (x)
+  - ota updates über WLAN
+  - webseite zum ändern des hostnamens
+  - webseite zum einstellen von WLAN Zugangsdaten
 
 
-  Hinweise:
-  - PWM-Ausgabe für Buzzer erfolgt für espressif systems version 3.x via 
-    ledcAttach(buzzerPin, 1000, BUZZER_RES); // // Ton-Setup mit neuer API, Start mit 1 kHz, 8 Bit
-    ledcWrite(buzzerPin, vol);  // Lautstärke (Duty Cycle)
-    ledcChangeFrequency(buzzerPin, freq, BUZZER_RES);    
-  -Wir verwenden in der PlatformIO die espressif systems version 2.x dort ist es anders
+Hauptfunktionen:
+  - Steuerung über weboberfläche und websocket:
+   * Steuerung von 9 Servos über Slider
+   * 3 LEDS über Slider
+   * Einstellbarer Low-Pass-Filter für sanfte Bewegungen
+  - Auslesen und Anzeigen über weboberfläche und websocket:
+    * 4 Potentiometern (analog)
+    * 3 Touch-Pins (kapazitiv)
+    * 1 Schalter (mit internem Pull-Up)
+
+
 
  ToDo:
- - schieberegler stimmen nicht wenn "alle servos 90" gedrückt wird und wenn sie extern betätigt werden
+ - bei schnellen websocket commands hängt sich der esp auf
+  - seite namen ändern hinzufügen
+
  
 */
 
@@ -52,6 +47,8 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include "esp_system.h"
+#include <ArduinoOTA.h>
+#include <ArduinoJson.h>
 
 void loadOrGenerateMAC(uint8_t *mac);
 
@@ -60,16 +57,9 @@ const int potiPins[] = {36, 39, 34, 35};
 const int schalterPins[] = {25};
 const int touchPins[] = {32, 33, 27};
 const int ledPins[] = {14, 12, 13};
-const int buzzerPin = 26;
 const int LED_ONBOARD = 2;   // blaue Onboard LED
 uint8_t currentMAC[6];   // globale Variable
 
-//eigenes Namespace für die Poti-Option
-const char* PREF_NS_CTRL = "ctrl";
-
-#define BUZZER_RES 8
-#define BUZZER_DUTY 128 // 50% bei 8 Bit
-#define BUZZER_CHANNEL 7
 
 #define NUM_SERVOS (sizeof(servoPins) / sizeof(servoPins[0]))
 #define NUM_POTIS (sizeof(potiPins) / sizeof(potiPins[0]))
@@ -99,53 +89,53 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 Preferences preferences;
 
-String espName = ""; // --- NEU: Globaler Name ---
+String espName = ""; 
 
 String chipID = "";
-String currentSSID = "";
-String currentPASS = "";
+
+// startup wifi credentials
+const String DEFAULT_SSID = "robot";
+const String DEFAULT_PASSWORD = "goodlife";
 bool wifiConnected = false;
 IPAddress wifiIP;
 
-unsigned long nextToneTime = 0;
-int toneIndex = 0;
 
-//void generateChipID() {
-//Das folgende klappt nicht da bei clone die MAC manchmal gleich ist  
-//  uint64_t mac = ESP.getEfuseMac();
-//  chipID = String((uint32_t)(mac >> 32), HEX) + String((uint32_t)(mac & 0xFFFFFFFF), HEX);
-//  chipID.toUpperCase();
-//}
 
-// --- NEU: Base64 Encoder für MAC ---
-String macToBase64(uint8_t *mac) {
-  const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  uint64_t value = 0;
-  for (int i = 0; i < 6; i++) {
-    value = (value << 8) | mac[i];
-  }
-  String out = "";
-  for (int i = 0; i < 8; i++) {
-    int idx = (value >> (42 - i * 6)) & 0x3F;
-    out += b64[idx];
-  }
-  return out;
-}
+
 
 // --- NEU: Name laden oder erzeugen ---
 void loadOrGenerateName() {
   preferences.begin("id", false);
-  espName = preferences.getString("name", "");
+  espName = preferences.getString("hostname", "");
   if (espName == "") {
-    // MAC lesen
-    uint8_t mac[6];
-    loadOrGenerateMAC(mac);
-    espName = macToBase64(mac);
-    preferences.putString("name", espName);
-    Serial.println("Neuer Name erzeugt: " + espName);
+    // Neuen Namen erzeugen: "esp-" + zufälliger name aus list1 + zufälliger name aus list2 + 2* zufälliges zeichen aus list3
+    // Liste 1: Präfixe (erste Wortteile)
+
+    const char* list1[] = {
+      "Robo", "Mech", "Nano", "Byte", "Beta", "Tron", "Code", "Volt",
+      "Gear", "Chip", "Hex", "Pix", "Neo", "Bit", "Dyno", "Electro",
+      "Flux", "Atom", "Core", "Auto", "Luna", "Nova", "Bolt", "Data",
+      "Spark", "Glim", "Blink", "Buzz", "Kilo", "Mini", "Pico", "Giga",
+      "Tera", "Astro", "Juno", "Velo"
+    };
+
+    // Liste 2: Suffixe (zweite Wortteile)
+    const char* list2[] = {
+      "Lab", "Kit", "Hub", "Pix", "Bit", "Loop", "Bot", "Cube",
+      "Droid", "Node", "Tick", "Dash", "Spark", "Mod", "Brain", "Bug",
+      "Box", "Link", "Fun", "Nest", "Tron", "Orb", "Core", "Max",
+      "Plus", "Star", "Beam", "Logic", "Wave", "Bolt", "Flow", "Net",
+      "Grid", "Mind", "Edge", "Zone"
+    };
+    const char list3[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    espName = "esp-" + String(list1[random(0, 8)]) + String(list2[random(0, 8)]) + String(list3[random(0, 36)]) + String(list3[random(0, 36)]);
+    preferences.putString("hostname", espName);
+    Serial.println("New name");
   } else {
-    Serial.println("Geladener Name: " + espName);
+    Serial.println("Name loaded");
   }
+  Serial.println("Name: " + espName);
   preferences.end();
 }
 
@@ -164,7 +154,7 @@ void loadOrGenerateMAC(uint8_t *mac) {
                &values[3], &values[4], &values[5]) == 6) {
       for (int i = 0; i < 6; i++) mac[i] = (uint8_t) values[i];
     }
-    Serial.println("Geladene eigene MAC: " + stored);
+    Serial.println("Loaded MAC: " + stored);
   } else {
     // Neue zufällige lokale MAC erzeugen
     mac[0] = 0x02;  // lokal, unicast
@@ -174,7 +164,7 @@ void loadOrGenerateMAC(uint8_t *mac) {
     sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     preferences.putString("mac", buf);
-    Serial.println("Neue zufällige MAC gespeichert: " + String(buf));
+    Serial.println("new random MAC: " + String(buf));
   }
 
   preferences.end();
@@ -192,24 +182,35 @@ String macToString(uint8_t *mac) {
 }
 
 void saveWiFiCredentials(const String &ssid, const String &pass) {
-  preferences.begin("wifi", false);
+  preferences.begin("wlan", false);
   preferences.putString("ssid", ssid);
   preferences.putString("pass", pass);
   preferences.end();
 }
 
 bool loadWiFiCredentials(String &ssid, String &pass) {
-  preferences.begin("wifi", true);
+  preferences.begin("wlan", true);
   ssid = preferences.getString("ssid", "");
   pass = preferences.getString("pass", "");
   preferences.end();
-  return ssid.length() > 0;
+
+  if (ssid == "") {
+    Serial.println("No WLAN credentials stored.");
+    // speichere Standard SSID und Passwort
+    saveWiFiCredentials(DEFAULT_SSID, DEFAULT_PASSWORD);
+    ssid = DEFAULT_SSID; 
+    pass = DEFAULT_PASSWORD;
+  }
+  return ssid != "";
 }
 
 void tryConnectToWiFi() {
-  if (!loadWiFiCredentials(currentSSID, currentPASS)) return;
+  String currentSSID;
+  String currentPASS;
+  loadWiFiCredentials(currentSSID, currentPASS);
+
   WiFi.begin(currentSSID.c_str(), currentPASS.c_str());
-  Serial.print("Verbinde mit WLAN: ");
+  Serial.print("Connecting to WLAN: ");
   Serial.println(currentSSID);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
@@ -221,11 +222,11 @@ void tryConnectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     wifiIP = WiFi.localIP();
-    Serial.println("Verbunden! IP: " + wifiIP.toString());
+    Serial.println("Connected! IP: " + wifiIP.toString());
     digitalWrite(LED_ONBOARD, HIGH);   // LED an bei WLAN
 
   } else {
-    Serial.println("Verbindung fehlgeschlagen.");
+    Serial.println("Connection failed.");
     digitalWrite(LED_ONBOARD, LOW);    // LED aus
   }
 }
@@ -233,87 +234,53 @@ void tryConnectToWiFi() {
 void setupDualWiFi() {
 
   uint8_t mac[6];
-  loadOrGenerateMAC(mac); // NEU
-  loadOrGenerateName();  // NEU
-
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(espName.c_str());
-  Serial.println("Access Point gestartet: " + WiFi.softAPIP().toString());
-  Serial.println("SSID: " + espName);
+  loadOrGenerateMAC(mac); 
+  loadOrGenerateName();
 
   tryConnectToWiFi();
 
   if (wifiConnected) {
     if (MDNS.begin(espName.c_str())) {
-      Serial.println("mDNS aktiv unter: http://" + espName + ".local");
+      Serial.println("mDNS active at: http://" + espName + ".local");
     } else {
-      Serial.println("mDNS konnte nicht gestartet werden");
+      Serial.println("mDNS could not be started");
     }
   }
+  else {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(espName.c_str());
+    Serial.println("Access Point started: " + WiFi.softAPIP().toString());
+    Serial.println("SSID: " + espName);
+    Serial.println("WLAN not connected, only AP active.");
+  }
 }
 
-void updateToneSequence() {
-  if (!playSound || millis() < nextToneTime) return;
 
-  if (toneIndex >= soundSequence.length()) {
-    //ledcWrite(buzzerPin, 0);
-    ledcWrite(BUZZER_CHANNEL,0);
-    playSound = false;
-    toneIndex = 0;
-    return;
-  }
-
-  int sep1 = soundSequence.indexOf(',', toneIndex);
-  int sep2 = soundSequence.indexOf(',', sep1 + 1);
-  int sep3 = soundSequence.indexOf(';', sep2 + 1);
-
-  if (sep1 == -1 || sep2 == -1) {
-    ledcWrite(BUZZER_CHANNEL, 0);  // Not-Aus
-    playSound = false;
-    return;
-  }
-
-  int freq = soundSequence.substring(toneIndex, sep1).toInt();
-  int vol = soundSequence.substring(sep1 + 1, sep2).toInt();
-  int dur = soundSequence.substring(sep2 + 1, sep3 == -1 ? soundSequence.length() : sep3).toInt();
-
-  if (freq > 0) {
-    ledcChangeFrequency(BUZZER_CHANNEL, freq, BUZZER_RES);
-    ledcWrite(BUZZER_CHANNEL, map(vol, 0, 100, 0, 255)); // Duty Cycle
-  } else {
-    ledcWrite(BUZZER_CHANNEL, 0); // Pause
-  }
-
-  nextToneTime = millis() + dur;
-  toneIndex = (sep3 == -1) ? soundSequence.length() : sep3 + 1;
-}
 
 void handleSensoren(AsyncWebServerRequest *request){
-    String json = "{";
-    
-    // Potis
+    // 1. Statisches Dokument erstellen
+    const size_t CAPACITY = JSON_OBJECT_SIZE(NUM_POTIS + NUM_TOUCH + NUM_SCHALTER);
+    StaticJsonDocument<CAPACITY> doc;
+
+    // 2. Daten eintragen
     for (int i = 0; i < NUM_POTIS; i++) {
-        json += "\"poti" + String(i) + "\":" + String(potiValues[i]);
-        if (i < NUM_POTIS-1 || NUM_TOUCH > 0 || NUM_SCHALTER > 0) json += ",";
+        doc["poti" + String(i)] = potiValues[i];
     }
-
-    // Touch
     for (int i = 0; i < NUM_TOUCH; i++) {
-        json += "\"touch" + String(i) + "\":" + String(touchValues[i]);
-        if (i < NUM_TOUCH-1 || NUM_SCHALTER > 0) json += ",";
+        doc["touch" + String(i)] = touchValues[i];
     }
-
-    // Schalter
     for (int i = 0; i < NUM_SCHALTER; i++) {
-        json += "\"schalter" + String(i) + "\":" + String(schalterValues[i]);
-        if (i < NUM_SCHALTER-1) json += ",";
+        doc["schalter" + String(i)] = schalterValues[i];
     }
-
-    json += "}";
-    request->send(200, "application/json", json);
+    
+    // 3. KORREKTUR: Serialisiere das Dokument ZUERST zu einem String
+    String jsonOutput;
+    // Wir nutzen serializeJson in die String-Variable
+    serializeJson(doc, jsonOutput); 
+    
+    // 4. Sende den String, wie es die AsyncWebServer-Lib erwartet
+    request->send(200, "application/json", jsonOutput); // <-- Jetzt wird der String übergeben
 }
-
-
 void setup() {
   randomSeed(esp_random());
   Serial.begin(115200);
@@ -326,15 +293,7 @@ void setup() {
   pinMode(LED_ONBOARD, OUTPUT);
   digitalWrite(LED_ONBOARD, LOW); 
 
-  //sound laden
-  preferences.begin("sound", true);
-  soundSequence = preferences.getString("sequence", "440,100,300;0,0,100;660,100,300;"); // beim ersten start leer, das soll nicht sein:
-  preferences.end();
 
-  //Poti-Status laden (Default beim ersten Start = false)
-  preferences.begin(PREF_NS_CTRL, true);
-  potiControl = preferences.getBool("poti", false);
-  preferences.end();
 
   for (int i = 0; i < NUM_SERVOS; i++) {
     servos[i].attach(servoPins[i]);
@@ -352,16 +311,17 @@ void setup() {
     digitalWrite(ledPins[i], LOW);
   }
 
-ledcSetup(BUZZER_CHANNEL, 1000, BUZZER_RES);   // Kanal konfigurieren
-ledcAttachPin(buzzerPin, BUZZER_CHANNEL);      // Pin mit Kanal verbinden
-ledcWrite(BUZZER_CHANNEL, 0);                  // Startwert
 
   setupDualWiFi();
   
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>ESP32</title></head><body>";
   html += "<h1>ESP32 Steuerung</h1>";
-  html += "<p><strong>IP:</strong> " + wifiIP.toString() + "</p>";
+  if (wifiConnected) {
+    html += "<p><strong>IP:</strong> " + WiFi.localIP().toString() + "</p>";
+  } else {
+    html += "<p><strong>IP (AP):</strong> " + WiFi.softAPIP().toString() + "</p>";
+  }
   html += "<p><strong>Name:</strong> " + espName + ".local</p>";
   html += "<p><strong>MAC:</strong> " + macToString(currentMAC) + "</p>";
   html += "<p><a href='/wlan'>WLAN-Einstellungen</a></p>";
@@ -382,7 +342,7 @@ ledcWrite(BUZZER_CHANNEL, 0);                  // Startwert
     html += "<span id='servoVal" + String(i) + "'>" + String(servoTargets[i]) + "&deg;</span><br>";
   }
   html += "<p></p>";
-  html += "<button onclick='setAllServos90()'>Alle Servos auf 90°</button><br><br>";
+  html += "<button onclick='setAllServos90()'>All servos to 90°</button><br><br>";
 
   html += "<h2>LED Steuerung</h2>";
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -390,10 +350,6 @@ ledcWrite(BUZZER_CHANNEL, 0);                  // Startwert
     html += "<input type='range' min='0' max='1' value='" + String(ledStates[i] ? 1 : 0) +
             "' id='led" + i + "' oninput='sendLed(this)'><br>";
   }
-
-  html += "<h2>Tonfolge</h2>";
-  html += "<form action='/sound' method='get'>Tonfolge (freq,vol,dur;...): Beispiel 1100,80,200;1800,80,200;1800,80,200; <br>";
-  html += "<input name='seq' size='60'><br><input type='submit' value='Abspielen'></form>";
 
   html += "<h2>Sensorwerte</h2><ul>";
   html += "<p><a href='/sensoren'>Sensorwerte</a></p>";
@@ -434,11 +390,11 @@ ledcWrite(BUZZER_CHANNEL, 0);                  // Startwert
 
 server.on("/wlan", HTTP_GET, [](AsyncWebServerRequest *request) {
   request->send(200, "text/html", R"rawliteral(
-    <h2>WLAN verbinden</h2>
+    <h2>Connect WLAN</h2>
     <form action="/join" method="get">
       SSID: <input name="ssid"><br>
       Passwort: <input name="pass" type="password"><br>
-      <input type="submit" value="Verbinden">
+      <input type="submit" value="Connect">
     </form>
   )rawliteral");
 });
@@ -448,30 +404,14 @@ server.on("/join", HTTP_GET, [](AsyncWebServerRequest *request) {
     String ssid = request->getParam("ssid")->value();
     String pass = request->getParam("pass")->value();
     saveWiFiCredentials(ssid, pass);
-    request->send(200, "text/html", "<p>WLAN gespeichert. Starte neu...</p>");
+    request->send(200, "text/html", "<p>WLAN saved. Restarting...</p>");
     delay(1000);
     ESP.restart();
   } else {
-    request->send(400, "text/plain", "Fehlende Parameter");
+    request->send(400, "text/plain", "Missing parameters");
   }
 });
 
-server.on("/sound", HTTP_GET, [](AsyncWebServerRequest *request) {
-  if (request->hasParam("seq")) {
-    soundSequence = request->getParam("seq")->value();
-    playSound = true;
-    toneIndex = 0;
-
-    //sequenz speichern
-    preferences.begin("sound", false);
-    preferences.putString("sequence", soundSequence);
-    preferences.end();
-    
-    request->send(200, "text/html", "<p>Tonfolge wird abgespielt. <a href='/'>Zur&uuml;ck</a></p>");
-  } else {
-    request->send(400, "text/plain", "Fehlender Parameter");
-  }
-});
 
 server.on("/sensoren", HTTP_GET, handleSensoren);
 
@@ -480,9 +420,18 @@ server.on("/test", HTTP_GET, [](AsyncWebServerRequest *request) {
 });
 
 ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
-  if (type == WS_EVT_CONNECT) {
-    Serial.println("WebSocket verbunden → Poti aus");
-    // ALT: potiControl = false; //nicht mehr beim verbinden ausschalten
+
+if (type == WS_EVT_CONNECT) {
+    Serial.printf("WS Client #%u connected\n", client->id());
+    
+    // NEU: Sende den initialen Servo-Status an den neuen Client
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        client->printf("servo:%d:%d", i, servoTargets[i]);
+    }
+    // Sende andere initial States (z.B. potiControl, filter, leds)
+    client->printf("poti:%s", potiControl ? "on" : "off");
+    client->printf("filter:%.2f", filter);
+    
     return;
   }
 
@@ -513,14 +462,7 @@ ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType
     }
     return;
   }
-  if (strcmp(buf, "poti:off") == 0) {
-    if (potiControl) {
-      potiControl = false;
-      persistPotiPending = true;
-      persistPotiAt = millis() + 1000;
-    }
-    return;
-  }
+
 
   if (strncmp(buf, "filter:", 7) == 0) {
     float f = 0.0f;
@@ -551,31 +493,15 @@ ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType
     return;
   }
 
-  if (strncmp(buf, "sound:", 6) == 0) {
-    // limit sound command length
-    size_t payload_len = len - 6;
-    const size_t MAX_SOUND = 256;
-    if (payload_len == 0) return;
-    if (payload_len > MAX_SOUND) {
-      Serial.println("WS: sound payload too long, drop");
-      return;
-    }
-    // assign to soundSequence (may allocate) but payload is bounded
-    soundSequence = String(buf + 6);
-    playSound = true;
-    toneIndex = 0;
-    Serial.println("Sound-Befehl erhalten.");
-    return;
-  }
 });
 
-server.on("/name", HTTP_GET, [](AsyncWebServerRequest *request) {
+server.on("/hostname", HTTP_GET, [](AsyncWebServerRequest *request) {
   if (request->hasParam("n")) {
     String newName = request->getParam("n")->value();
 
-    // Prüfen: genau 8 Zeichen und nur Base64 erlaubt
+    // Prüfen: nur Base64 erlaubt
     const char* allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    bool valid = (newName.length() == 8);
+    bool valid = true;
     if (valid) {
       for (int i = 0; i < newName.length(); i++) {
         if (strchr(allowed, newName[i]) == NULL) {
@@ -587,7 +513,7 @@ server.on("/name", HTTP_GET, [](AsyncWebServerRequest *request) {
 
     if (valid) {
       preferences.begin("id", false);
-      preferences.putString("name", newName);
+      preferences.putString("hostname", newName);
       preferences.end();
       request->send(200, "text/html",
                     "<p>Name gespeichert: " + newName + "<br>ESP startet neu...</p>");
@@ -595,16 +521,16 @@ server.on("/name", HTTP_GET, [](AsyncWebServerRequest *request) {
       ESP.restart();
     } else {
       request->send(400, "text/html",
-                    "<p>Ungültiger Name!<br>Nur 8 Zeichen erlaubt (A-Z, a-z, 0-9, +, /).</p>"
+                    "<p>Ungültiger Name!<br>Only (A-Z, a-z, 0-9, +, /).</p>"
                     "<p><a href='/name'>Zurück</a></p>");
     }
 
   } else {
-    String html = "<h2>ESP Name ändern</h2>";
-    html += "<p>Aktueller Name: <b>" + espName + "</b></p>";
-    html += "<form action='/name' method='get'>Neuer Name (8 Zeichen, Base64): ";
+    String html = "<h2>Change ESP Name</h2>";
+    html += "<p>Current Name: <b>" + espName + "</b></p>";
+    html += "<form action='/name' method='get'>New Name (8 characters, Base64): ";
     html += "<input name='n' maxlength='8'><br>";
-    html += "<input type='submit' value='Speichern'></form>";
+    html += "<input type='submit' value='Save'></form>";
     request->send(200, "text/html", html);
   }
 });
@@ -616,26 +542,43 @@ server.on("/name", HTTP_GET, [](AsyncWebServerRequest *request) {
 
 server.begin();
 
+// Nur ArduinoOTA starten, wenn WLAN (STA-Modus) erfolgreich verbunden ist!
+    if (wifiConnected) { 
+        // OPTIONAL ABER SEHR EMPFOHLEN: OTA-Callbacks für Fortschrittsanzeige hinzufügen!
+        // (Diese fehlen in Ihrem Sketch und sind wichtig für die IDE-Ausgabe)
+        ArduinoOTA
+            .onStart([]() { Serial.println("OTA starting..."); })
+            .onEnd([]() { Serial.println("\nOTA finished. Restarting..."); })
+            .onProgress([](unsigned int progress, unsigned int total) { 
+                Serial.printf("Progress: %u%%\r", (progress / (total / 100))); 
+            })
+            .onError([](ota_error_t error) { Serial.printf("Error[%u]: ", error); });
+
+        ArduinoOTA.setHostname(espName.c_str());
+        // ArduinoOTA.setPassword("Ihr_sicheres_OTA_Passwort"); // WICHTIG für Sicherheit!
+        
+        ArduinoOTA.begin(); // <-- Startet den mDNS/OTA-Dienst
+
+        Serial.println("OTA service ready.");
+    }
+
+Serial.println("Ready");
+Serial.print("IP address: ");
+Serial.println(WiFi.localIP());
+Serial.println("Hostname: " + espName);
 }
 
 void loop() {
+  ArduinoOTA.handle();
   ws.cleanupClients();
 
   // Periodic heap logging to help diagnose reboots
-  static unsigned long lastHeapLog = 0;
-  if (millis() - lastHeapLog > 5000) {
-    lastHeapLog = millis();
-    Serial.printf("heap=%u, minHeap=%u\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
-  }
+  //static unsigned long lastHeapLog = 0;
+  //if (millis() - lastHeapLog > 5000) {
+  //  lastHeapLog = millis();
+  //  Serial.printf("heap=%u, minHeap=%u\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
+  //}
 
-  // Persist potiControl if requested (debounced to avoid frequent NVS writes)
-  if (persistPotiPending && millis() >= persistPotiAt) {
-    persistPotiPending = false;
-    preferences.begin(PREF_NS_CTRL, false);
-    preferences.putBool("poti", potiControl);
-    preferences.end();
-    Serial.println("Persisted potiControl");
-  }
 
   for (int i = 0; i < NUM_POTIS; i++) {
     potiValues[i] = analogRead(potiPins[i]);
@@ -647,78 +590,44 @@ void loop() {
     schalterValues[i] = digitalRead(schalterPins[i]);
   }
   
-  // Sensorwerte über WebSocket an den Client senden
-  // Sende alle 30 Millisekunden
-  static unsigned long lastSendTime = 0;
-    const long interval = 50;
-    if (millis() - lastSendTime > interval) {
-        lastSendTime = millis();
-        String json = "{";
-        
-        // Potis
-        for (int i = 0; i < NUM_POTIS; i++) {
-            json += "\"poti" + String(i) + "\":" + String(potiValues[i]);
-            if (i < NUM_POTIS - 1 || NUM_TOUCH > 0 || NUM_SCHALTER > 0) json += ",";
-        }
+// NEUE LOGIK (STABIL MIT ARDUINOJSON)
+// Sende alle [interval] Millisekunden
+static unsigned long lastSendTime = 0;
+const long interval = 100; // Wir lassen es bei 100ms für den Test
 
-        // Touch
-        for (int i = 0; i < NUM_TOUCH; i++) {
-            json += "\"touch" + String(i) + "\":" + String(touchValues[i]);
-            if (i < NUM_TOUCH - 1 || NUM_SCHALTER > 0) json += ",";
-        }
+if (millis() - lastSendTime > interval) {
+    lastSendTime = millis();
+    
+    // 1. Statische Zuweisung (empfohlen für festes Layout)
+    // Wir schätzen die notwendige Speichermenge. 
+    // Der JSON-String ist relativ klein (ca. 10 Werte, 100 Zeichen).
+    const size_t CAPACITY = JSON_OBJECT_SIZE(NUM_POTIS + NUM_TOUCH + NUM_SCHALTER);
+    StaticJsonDocument<CAPACITY> doc;
 
-        // Schalter
-        for (int i = 0; i < NUM_SCHALTER; i++) {
-            json += "\"schalter" + String(i) + "\":" + String(schalterValues[i]);
-            if (i < NUM_SCHALTER - 1) json += ",";
-        }
-
-        json += "}";
-        
-        ws.textAll(json);
+    // 2. Daten eintragen
+    for (int i = 0; i < NUM_POTIS; i++) {
+        doc["poti" + String(i)] = potiValues[i];
+    }
+    for (int i = 0; i < NUM_TOUCH; i++) {
+        doc["touch" + String(i)] = touchValues[i];
+    }
+    for (int i = 0; i < NUM_SCHALTER; i++) {
+        doc["schalter" + String(i)] = schalterValues[i];
     }
 
-  if (potiControl) {
-      // Potis 0–3 → Servos 0–3
-      for (int i = 0; i < 4 && i < NUM_POTIS && i < NUM_SERVOS; i++) {
-        int mapped = map(potiValues[i], 0, 4095, 0, 180);
-        servoTargets[i] = mapped;
-      }
+    // 3. JSON an den WebSocket senden
+    // Die Funktion serializeJson speichert den String in einem Puffer 
+    // und sendet ihn direkt über den WebSocket.
     
-      // Touch → Servos 4 und 5
-      int threshold = 40;
+    // Senden des JSON als String an alle verbundenen Clients
+    char output[256]; // Puffer für den finalen JSON-String
+    size_t len = serializeJson(doc, output, sizeof(output));
     
-      // Touch 0 → Servo 4
-      if (NUM_TOUCH > 0 && NUM_SERVOS > 4) {
-        servoTargets[4] = (touchValues[0] > threshold) ? 0 : 90;
-      }
-    
-      // Touch 1 → Servo 5
-      if (NUM_TOUCH > 1 && NUM_SERVOS > 5) {
-        servoTargets[5] = (touchValues[1] > threshold) ? 90 : 0;
-      }
-    
-      // Touch 2 → LED 0
-      if (NUM_TOUCH > 2 && NUM_LEDS > 0) {
-        ledStates[0] = (touchValues[2] > threshold);
-        ledStates[1]=ledStates[0];
-        ledStates[2]=ledStates[0];
-      }
-    
-      // Restliche Servos kopieren Servo 0 (falls mehr als 6 vorhanden)
-      for (int i = 6; i < NUM_SERVOS; i++) {
-        servoTargets[i] = servoTargets[0];
-      }
-    
-      // Wenn Schalter gedrückt → Sound abspielen
-      if (schalterValues[0] == LOW && !playSound) {
-        
-        //soundSequence = "1000,100,200;1200,80,200;800,50,300;";
-        //astronomia soundSequence = "146.83, 79, 112; 0.0, 0, 188; 146.83, 79, 112; 0.0, 0, 38; 220.0, 79, 112; 0.0, 0, 38; 196.0, 79, 112; 0.0, 0, 188; 174.61, 79, 112; 0.0, 0, 188; 164.81, 79, 112; 0.0, 0, 188; 164.81, 79, 112; 0.0, 0, 38; 174.61, 79, 112; 0.0, 0, 38; 196.0, 79, 112; 0.0, 0, 188; 174.61, 79, 112; 0.0, 0, 38; 164.81, 79, 112; 0.0, 0, 38; 146.83, 79, 112; 0.0, 0, 188; 146.83, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 146.83, 79, 112; 0.0, 0, 188; 146.83, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 146.83, 79, 112; 0.0, 0, 188; 146.83, 79, 112; 0.0, 0, 38; 220.0, 79, 112; 0.0, 0, 38; 196.0, 79, 112; 0.0, 0, 188; 174.61, 79, 112; 0.0, 0, 188; 164.81, 79, 112; 0.0, 0, 188; 164.81, 79, 112; 0.0, 0, 38; 174.61, 79, 112; 0.0, 0, 38; 196.0, 79, 112; 0.0, 0, 188; 174.61, 79, 112; 0.0, 0, 38; 164.81, 79, 112; 0.0, 0, 38; 146.83, 79, 112; 0.0, 0, 188; 146.83, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 146.83, 79, 112; 0.0, 0, 188; 146.83, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 329.63, 79, 112; 0.0, 0, 38; 349.23, 79, 112; 0.0, 0, 38; 174.61, 79, 112; 0.0, 0, 38; 174.61, 79, 56; 0.0, 0, 94; 174.61, 79, 112; 0.0, 0, 38; 174.61, 79, 56; 0.0, 0, 94; 220.0, 79, 112; 0.0, 0, 38; 220.0, 79, 56; 0.0, 0, 94; 220.0, 79, 131; 0.0, 0, 19; 220.0, 79, 56; 0.0, 0, 94; 196.0, 79, 112; 0.0, 0, 38; 196.0, 79, 56; 0.0, 0, 94; 196.0, 79, 112; 0.0, 0, 38; 196.0, 79, 56; 0.0, 0, 94; 261.63, 79, 112; 0.0, 0, 38; 261.63, 79, 56; 0.0, 0, 94; 261.63, 79, 112; 0.0, 0, 38; 261.63, 79, 56; 0.0, 0, 94; 293.66, 79, 112; 0.0, 0, 38; 293.66, 79, 56; 0.0, 0, 94; 293.66, 79, 112; 0.0, 0, 38; 293.66, 79, 56; 0.0, 0, 94; 293.66, 79, 112; 0.0, 0, 38; 293.66, 79, 56; 0.0, 0, 94; 293.66, 79, 112; 0.0, 0, 38; 293.66, 79, 56; 0.0, 0, 94; 293.66, 79, 112; 0.0, 0, 38; 293.66, 79, 56; 0.0, 0, 94; 293.66, 79, 112; 0.0, 0, 38; 293.66, 79, 56; 0.0, 0, 94; 196.0, 79, 112; 0.0, 0, 38; 174.61, 79, 112; 0.0, 0, 38; 164.81, 79, 112; 0.0, 0, 38; 130.81, 79, 112;";
-        playSound = true;
-        toneIndex = 0;
-      }
+    if (len > 0) {
+        ws.textAll(output);
     }
+}
+
 
   for (int i = 0; i < NUM_SERVOS; i++) {
     currentAngles[i] = filter * currentAngles[i] + (1.0 - filter) * servoTargets[i];
@@ -729,7 +638,6 @@ void loop() {
     digitalWrite(ledPins[i], ledStates[i]);
   }
 
-  updateToneSequence();
 
   delay(10);
 }

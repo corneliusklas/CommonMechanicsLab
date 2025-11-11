@@ -39,6 +39,9 @@ firmware/.pio/
 firmware/*/build/
 firmware/*/.pio/
 firmware/*/.vscode/
+!firmware/**/*.bin
+!firmware/*.bin
+!firmware/**/build/*.bin
 
 # --- Web / Frontend ---
 node_modules/
