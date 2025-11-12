@@ -51,14 +51,17 @@
     
     // Konstante Pfade definieren
     const editorPath = '/turbowrap/build-tw/editor.html';
-    const extensionPath = '/turbowrap/extensions/esp32control.js';
+    const extensionPath1 = '/turbowrap/extensions/esp32control.js';
+	const extensionPath3 = '/turbowrap/extensions/piaiextension.js';
     
     // 1. Die vollständige Extension-URL erstellen (MUSS ABSOLUT SEIN!)
-    const absoluteExtensionUrl = baseHostUrl + extensionPath;
+    const absoluteExtensionUrl1 = baseHostUrl + extensionPath1;
+	const absoluteExtensionUrl2 = baseHostUrl + extensionPath2;
     
     // 2. Die finale URL zusammenbauen (Basis-URL + Editor-Pfad + Extension-Parameter)
     const finalUrl = baseHostUrl + editorPath + 
-                     '?extension=' + encodeURIComponent(absoluteExtensionUrl);
+                     '?extension=' + encodeURIComponent(absoluteExtensionUrl1)+
+					 '?extension=' + encodeURIComponent(absoluteExtensionUrl2);;
     
     // 3. Den Link im Dokument finden und den href-Wert setzen
     const linkElement = document.getElementById('turbo-link');
