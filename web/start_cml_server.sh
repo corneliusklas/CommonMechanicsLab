@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/robot/programs/common-mechanics-lab/web || exit
+cd /home/robot/programs/common-mechanics-lab/python || exit
 source venv/bin/activate
 
 # Alte Logs auf 500 Zeilen begrenzen
@@ -9,4 +9,4 @@ if [ -f /home/robot/cml.log ]; then
 fi
 
 echo "--- Start: $(date) ---" >> /home/robot/cml.log
-python3 flask-server.py >> /home/robot/cml.log 2>&1
+python3 server.py >> /home/robot/cml.log 2>&1
