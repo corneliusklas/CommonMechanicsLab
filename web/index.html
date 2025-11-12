@@ -26,6 +26,9 @@
             border-radius: 8px;
             font-weight: bold;
             transition: background-color 0.2s;
+            text-align: center;
+            width: 80%; /* Verbessert die Lesbarkeit auf mobilen Geräten */
+            max-width: 400px;
         }
         a:hover { background-color: #005f99; }
         small { margin-top: 40px; color: #666; }
@@ -40,28 +43,29 @@
     <a href="/devices" target="_blank">Netzwerkgeräte anzeigen</a>
 
     <small>Hosted on Raspberry Pi – Common Mechanics Lab</small>
-	
+    
 <script>
     // Host-Adresse dynamisch abrufen (z.B. 192.168.4.1 oder raspberrypi, ohne Port)
     const host = window.location.hostname;
-    const protocol = window.location.protocol; // z.B. "http:"
+    const protocol = window.location.protocol; 
     
-    // Die Basis-URL des Hosts (ohne Port, da Port 80 verwendet wird!)
-    const baseHostUrl = protocol + '//' + host;
+    // Die Basis-URL des Hosts (ohne Port, da Port 80 verwendet wird, oder mit aktuellem Port)
+    const baseHostUrl = protocol + '//' + host + (window.location.port ? ':' + window.location.port : '');
     
     // Konstante Pfade definieren
     const editorPath = '/turbowrap/build-tw/editor.html';
     const extensionPath1 = '/turbowrap/extensions/esp32control.js';
-	const extensionPath3 = '/turbowrap/extensions/piaiextension.js';
+    const extensionPath2 = '/turbowrap/extensions/piaiextension.js'; // Nutze die piaiextension.js als zweite Extension
     
-    // 1. Die vollständige Extension-URL erstellen (MUSS ABSOLUT SEIN!)
+    // 1. Die vollständigen Extension-URLs erstellen (MUSS ABSOLUT SEIN!)
     const absoluteExtensionUrl1 = baseHostUrl + extensionPath1;
-	const absoluteExtensionUrl2 = baseHostUrl + extensionPath2;
+    const absoluteExtensionUrl2 = baseHostUrl + extensionPath2;
     
     // 2. Die finale URL zusammenbauen (Basis-URL + Editor-Pfad + Extension-Parameter)
+    // Wichtig: ? für den ersten Parameter, & für den zweiten und alle folgenden.
     const finalUrl = baseHostUrl + editorPath + 
-                     '?extension=' + encodeURIComponent(absoluteExtensionUrl1)+
-					 '?extension=' + encodeURIComponent(absoluteExtensionUrl2);;
+                     '?extension=' + encodeURIComponent(absoluteExtensionUrl1) +
+                     '&extension=' + encodeURIComponent(absoluteExtensionUrl2);
     
     // 3. Den Link im Dokument finden und den href-Wert setzen
     const linkElement = document.getElementById('turbo-link');
@@ -71,6 +75,4 @@
 </script>
 
 </body>
-
-
 </html>
