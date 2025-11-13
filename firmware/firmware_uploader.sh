@@ -1,142 +1,90 @@
 #!/bin/bash
 
-Dieses Skript dient zum ERSTEN Flashen der ESP32-Firmware per USB
+# Dieses Skript flasht die ESP32-Firmware mit stabilen Parametern,
+# um bekannte Probleme mit empfindlichen ESP-WROOM-32 Boards unter Linux/Raspberry Pi zu umgehen.
 
-und zum Auslesen des Hostnamens über das Netzwerk.
+cd /home/robot/programs/common-mechanics-lab/firmware
+source venv/bin/activate
 
---- Konfiguration ---
+# --- Konfiguration ---
+# Basispfad zum PlatformIO-Build-Verzeichnis
+BASE_PATH="/home/robot/programs/common-mechanics-lab/firmware/common_firmware/.pio/build/az-delivery-devkit-v4"
 
-Absoluter Pfad zur Firmware-Datei
+# Stabilisierte Parameter
+CHIP_TYPE="esp32"
+# Wichtig: Reduzierte Baudrate für USB-Stabilität auf dem Raspberry Pi
+BAUDRATE="460800" 
+TOOL_COMMAND="/usr/bin/env python3 -m esptool"
 
-FIRMWARE_PATH="/home/robot/programs/common-mechanics-lab/firmware/common_firmware/.pio/build/az-delivery-devkit-v4/firmware.bin"
+# --- Funktionen ---
 
-Standard-Ziel (IP oder mDNS-Name, nach dem Neustart des ESP)
+log() {
+    echo "$(date '+%H:%M:%S') [INFO] $1"
+}
 
-DEFAULT_TARGET="esp-RoboLab.local"
+log_error() {
+    echo "$(date '+%H:%M:%S') [ERROR] $1" >&2
+}
 
-Standard-Serieller Port
+find_serial_port() {
+    local port=""
+    port=$(ls /dev/ttyUSB* 2>/dev/null | head -n 1)
+    if [ -z "$port" ]; then
+        port=$(ls /dev/ttyACM* 2>/dev/null | head -n 1)
+    fi
+    echo "$port"
+}
 
-DEFAULT_PORT="/dev/ttyUSB0"
+# --- Hauptlogik ---
 
-Basis-URL des ESP32 Webservers
-
-BASE_URL="http://"
-
---- Funktionen ---
-
-Prüfen, ob zenity installiert ist (für die grafische Oberfläche)
-
-if ! command -v zenity &> /dev/null
-then
-echo "ERROR: Das 'zenity'-Tool ist nicht installiert. Bitte installieren Sie es mit 'sudo apt install zenity'."
-exit 1
+# 1. Validierung der Umgebung und Dateien
+if ! command -v python3 &> /dev/null; then
+    log_error "Python 3 ist nicht installiert. Wird für esptool.py benötigt."
+    exit 1
 fi
 
-Prüfen, ob esptool.py installiert ist
-
-if ! command -v esptool &> /dev/null
-then
-zenity --error
-
---title="FEHLER: esptool.py fehlt"
-
---text="Das notwendige Tool 'esptool.py' ist nicht installiert.\n\nBitte installieren Sie es, BEVOR Sie fortfahren, mit folgendem Befehl:\n\n<b>python -m pip install esptool</b>"
-exit 1
+if [ ! -f "$BASE_PATH/firmware.bin" ] || [ ! -f "$BASE_PATH/bootloader.bin" ] || [ ! -f "$BASE_PATH/partitions.bin" ]; then
+    log_error "Eine oder mehrere notwendige ESP32 Firmware-Dateien wurden nicht gefunden."
+    log_error "Bitte stellen Sie sicher, dass das PlatformIO-Projekt kompiliert wurde und der Pfad korrekt ist: $BASE_PATH"
+    exit 1
 fi
 
---- 1. Ziel und Port abfragen ---
+SERIAL_PORT=$(find_serial_port)
 
-PORT=$(zenity --entry 
-
---title="ESP32 Firmware Upload (USB)" 
-
---text="Bitte geben Sie den seriellen Port des ESP32 an (z.B. /dev/ttyUSB0):" 
-
---entry-text="$DEFAULT_PORT"
-
---width=400)
-
-if [ -z "$PORT" ]; then
-zenity --error --text="Upload abgebrochen. Kein serieller Port angegeben."
-exit 1
+if [ -z "$SERIAL_PORT" ]; then
+    log_error "Kein geeignetes serielles Gerät für ESP32 gefunden."
+    log "Bitte stellen Sie sicher, dass das ESP32-Board angeschlossen ist."
+    exit 1
 fi
 
-TARGET=$(zenity --entry 
+log "Gefundenes ESP32-Gerät: $SERIAL_PORT"
+log "Starte stabilisierten ESP32 Firmware-Upload auf $SERIAL_PORT mit $BAUDRATE Baud..."
 
---title="ESP32 Zieladresse" 
+# 2. Setzen der Umgebungsvariablen (um Syntaxfehler in Python zu vermeiden)
+# Dies stellt die korrekte Flash-Frequenz und den Modus sicher (Fix für Anwendungsabsturz)
+export ESPTOOL_FLASH_FREQ=40m
+export ESPTOOL_FLASH_MODE=dio
 
---text="Bitte geben Sie die IP-Adresse oder den mDNS-Namen des ESP32 nach dem Neustart ein (z.B. esp-RoboLab.local):" 
+# 3. Multi-File-Flash-Befehl
+# Flasht Bootloader, Partitionstabelle und Anwendung an den korrekten Adressen.
+# --before / --after: Fix für den Absturz beim Reset des empfindlichen Boards B.
+$TOOL_COMMAND --chip $CHIP_TYPE --port $SERIAL_PORT --baud $BAUDRATE \
+    --before default-reset --after hard-reset \
+    write-flash \
+    0x1000 "$BASE_PATH/bootloader.bin" \
+    0x8000 "$BASE_PATH/partitions.bin" \
+    0x10000 "$BASE_PATH/firmware.bin"
 
---entry-text="$DEFAULT_TARGET"
+EXIT_CODE=$?
 
---width=400)
+# 4. Variablen und Ergebnis bereinigen
+unset ESPTOOL_FLASH_FREQ
+unset ESPTOOL_FLASH_MODE
 
-if [ -z "$TARGET" ]; then
-# Nicht kritisch, falls nur geflasht werden soll, aber wir fordern es trotzdem an.
-zenity --warning --text="Keine Zieladresse für das Auslesen des Hostnamens angegeben. Das Flashen wird trotzdem durchgeführt."
-fi
-
---- 2. Upload-Vorbereitung und Ausführung (USB Serial Flash) ---
-
-zenity --info --text="Starte seriellen Upload auf $PORT. \n\n<b>WICHTIG:</b> Bitte stellen Sie sicher, dass sich der ESP32 im Flash-Modus befindet (i.d.R. BOOT/GPIO0 gedrückt halten, EN drücken/loslassen)." &
-PID_INFO=$!
-
-Führt den Upload mit esptool aus
-
-Offset 0x10000 ist der Standard für PlatformIO-Binaries
-
-/usr/bin/env python3 -m esptool --chip esp32 --port "$PORT" --baud 460800 write_flash 0x10000 "$FIRMWARE\_PATH" 2\>&1
-UPLOAD\_STATUS=$?
-
-kill $PID_INFO 2>/dev/null
-
-if [ $UPLOAD_STATUS -ne 0 ]; then
-zenity --error --text="Fehler beim Upload (esptool Status: $UPLOAD_STATUS).\nÜberprüfen Sie:\n1. Ist der Port $PORT korrekt?\n2. Ist der ESP32 im Flash-Modus?"
-exit 1
-fi
-
-zenity --info --text="Firmware erfolgreich per USB geflasht. Warte auf Neustart und Netzwerkkonnektivität (10 Sekunden)..."
-sleep 10 # Länger warten, um dem ESP Zeit zu geben, WLAN zu initialisieren.
-
---- 3. Hostname auslesen ---
-
-if [ -n "$TARGET" ]; then
-zenity --info --text="Lese Hostnamen von $TARGET aus..." &
-PID_INFO=$\!
-HOSTNAME\_URL="${BASE_URL}${TARGET}"
-
-# Nutze curl, um die HTML-Seite abzurufen.
-HTML_CONTENT=$(curl -s --max-time 15 "$HOSTNAME_URL")
-CURL_STATUS=$?
-kill $PID_INFO 2>/dev/null
-
-if [ $CURL_STATUS -ne 0 ]; then
-    zenity --warning --text="Upload war erfolgreich, aber der ESP32 war unter $TARGET nicht erreichbar.\nBitte überprüfen Sie die Adresse manuell oder starten Sie den ESP neu."
-    exit 0
-fi
-
-# Extrahiert den Namen (z.B. 'esp-RoboLab') aus der Zeile: <p><strong>Name:</strong> esp-RoboLab.local</p>
-EXTRACTED_NAME=$(echo "$HTML_CONTENT" | grep -oP '<strong>Name:</strong> \K[^<]+')
-EXTRACTED_NAME_CLEAN=$(echo "$EXTRACTED_NAME" | sed 's/\.local$//')
-
-
-if [ -z "$EXTRACTED_NAME_CLEAN" ]; then
-    zenity --warning --text="Upload erfolgreich, aber der Hostname konnte nicht ausgelesen werden. Bitte manuell prüfen."
-    exit 0
-fi
-
-# --- 4. Ergebnis anzeigen ---
-zenity --info \
-    --title="Aktion erfolgreich!" \
-    --text="Die Firmware wurde erfolgreich geflasht.\nDer neue Hostname des ESP32 lautet:\n\n<b>$EXTRACTED_NAME_CLEAN</b>"
-
-
+if [ $EXIT_CODE -eq 0 ]; then
+    log "ESP32 Upload erfolgreich abgeschlossen."
 else
-zenity --info
-
---title="Aktion erfolgreich!"
-
---text="Die Firmware wurde erfolgreich geflasht.\nBitte starten Sie den ESP32 neu und prüfen Sie den Hostnamen manuell über die Konsole."
+    log_error "ESP32 Upload fehlgeschlagen. Fehlercode: $EXIT_CODE"
 fi
 
-exit 0
+log "Skript-Ausführung abgeschlossen."
