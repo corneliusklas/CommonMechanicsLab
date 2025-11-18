@@ -145,8 +145,8 @@ def devices():
         except:
             style = "color:gray;"
 
-        ip_link = f"<a href='http://{d['ip']}:5000/' target='_blank' style='{style}'>{d['ip']}</a>"
-        hostname_link = f"<a href='http://{d['hostname']}.local:5000/' target='_blank' style='{style}'>{d['hostname']}</a>"
+        ip_link = f"<a href='http://{d['ip']}/' target='_blank' style='{style}'>{d['ip']}</a>"
+        hostname_link = f"<a href='http://{d['hostname']}.local/' target='_blank' style='{style}'>{d['hostname']}</a>"
 
         html += f"<tr style='{style}'><td>{ip_link}</td><td>{hostname_link}</td></tr>"
 

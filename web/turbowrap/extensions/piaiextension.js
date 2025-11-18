@@ -27,6 +27,8 @@
             this.runtime = runtime;
             this._serverOrigin = DEFAULT_SERVER_ORIGIN;
             console.log(`PiAiExtension initialized. Server target: ${this._serverOrigin}`);
+			// Abonniert das interne Stopp-Ereignis der Scratch-Laufzeit
+            this.runtime.on(Scratch.events.PROJECT_STOP_ALL, this.handleProjectStop.bind(this));
         }
 
         getInfo() {
@@ -101,7 +103,8 @@
                         arguments: {
                             MESSAGE: {
                                 type: Scratch.ArgumentType.STRING,
-                                defaultValue: 'You are a helpful robot.'
+                                defaultValue: 'You are a helpful robot.',
+								multiline: true
                             }
                         }
                     },
@@ -149,6 +152,11 @@
                         opcode: 'getAllowedEmotions',
                         blockType: Scratch.BlockType.REPORTER,
                         text: 'get allowed emotion list',
+                    },
+					{
+                        opcode: 'onProjectStop', 
+                        blockType: Scratch.BlockType.HAT,
+                        text: 'when program stops',
                     },
 
                 ],
