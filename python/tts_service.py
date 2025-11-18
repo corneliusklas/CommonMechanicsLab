@@ -1,226 +1,348 @@
+# tts_service.py
+# -------------------------------------------------------------------------------------------------
+# Text-to-Speech (TTS) Service for PiBot
+#
+# PURPOSE: Provides a unified API endpoint for converting text to speech using various engines.
+#
+# ENGINES:
+# - OpenAI TTS: High-quality, cloud-based speech synthesis.
+# - gTTS (Google TTS): Cloud-based synthesis (requires internet).
+# - Espeak: Local, lightweight TTS engine (for offline capability).
+#
+# FUNCTIONALITY:
+# - Caching mechanism: Stores generated audio files locally to save API calls and bandwidth.
+# - Modulated playback: Includes logic to modulate audio output (e.g., lower frequency) if required.
+# - Status tracking: Manages the 'is_talking' state for real-time reporting to the frontend.
+# -------------------------------------------------------------------------------------------------
+
 import subprocess
 import os
-import requests
-import numpy as np
-import scipy.io.wavfile as wav # Alias wav for scipy.io.wavfile
 import time
-# HINWEIS: Es werden nur noch openai, scipy, numpy benötigt.
-# Die Audiowiedergabe und Konvertierung erfolgt über die installierten Systemtools ffplay/ffmpeg.
+import hashlib
+import json
+import numpy as np
+import scipy.io.wavfile as wav
+from gtts import gTTS 
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Initialize OpenAI client globally
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- CONFIGURATION ---
-OPENAI_TTS_OUTPUT_MP3 = "/tmp/openai_output.mp3"
-OPENAI_TTS_OUTPUT_WAV = "/tmp/openai_output.wav"
-MODULATED_OUTPUT_WAV = "/tmp/openai_modulated.wav"
+CACHE_DIR = os.path.expanduser("~/.local/share/tts_cache")
+MAX_OPENAI_REQUESTS = 100
+MAX_CACHE_FILES = 200 # LRU: löscht älteste Dateien
+MODULATED_OUTPUT_WAV = os.path.join(CACHE_DIR, "modulated_output.wav") # Zentraler Pfad für die modulierte Datei
 
-def get_audio_duration_ffprobe(file_path):
-    """
-    Calculates the duration of an audio file using ffprobe (part of ffmpeg).
-    Requires 'ffmpeg' package to be installed on the system.
-    """
-    try:
-        cmd = [
-            'ffprobe', 
-            '-v', 'error', 
-            '-show_entries', 'format=duration', 
-            '-of', 'default=noprint_wrappers=1:nokey=1', 
-            file_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
-    except Exception as e:
-        print(f"❌ Error calculating duration with ffprobe: {e}")
-        return 0.0
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
-def convert_mp3_to_wav_ffmpeg(input_mp3, output_wav):
-    """
-    Converts MP3 to 16-bit PCM WAV using ffmpeg.
-    This replaces the functionality of pydub.
-    """
-    try:
-        # -i: input file, -acodec pcm_s16le: 16-bit PCM codec, -ar 44100: sample rate
-        subprocess.run(
-            ['ffmpeg', '-i', input_mp3, '-acodec', 'pcm_s16le', '-ar', '44100', output_wav],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        print(f"Audio converted to WAV using ffmpeg: {output_wav}")
-        return True
-    except Exception as e:
-        print(f"❌ Error converting MP3 to WAV with ffmpeg: {e}")
-        return False
+# --- GLOBAL STATE ---
+openai_request_count = 0
+tts_cache_index_path = os.path.join(CACHE_DIR, "index.json")
+tts_cache_index = {}
+is_talking_state = False 
+
+# Load index if exists
+if os.path.exists(tts_cache_index_path):
+    with open(tts_cache_index_path, "r", encoding="utf-8") as f:
+        tts_cache_index = json.load(f)
+
+# --- STATUS MANAGEMENT ---
+
+def get_talking_status():
+    """Gibt den aktuellen Sprechstatus (True/False) zurück."""
+    global is_talking_state
+    return is_talking_state
+
+# --- UTILITY FUNCTIONS ---
+def save_index():
+    with open(tts_cache_index_path, "w", encoding="utf-8") as f:
+        json.dump(tts_cache_index, f)
+
+def hash_text(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def prune_cache():
+    """LRU: löscht alte Dateien, wenn MAX_CACHE_FILES überschritten"""
+    if len(tts_cache_index) <= MAX_CACHE_FILES:
+        return
+    sorted_items = sorted(tts_cache_index.items(), key=lambda x: x[1]["timestamp"])
+    for key, info in sorted_items[: len(tts_cache_index) - MAX_CACHE_FILES]:
+        try:
+            os.remove(info["path"])
+        except FileNotFoundError:
+            pass
+        del tts_cache_index[key]
+    save_index()
 
 def play_audio_ffplay(file_path):
-    """
-    Plays an audio file using the system's ffplay command.
-    """
-    duration_s = get_audio_duration_ffprobe(file_path)
-    if duration_s == 0:
-        return 0
+    """Spielt eine Audio-Datei mit ffplay ab und aktualisiert den globalen Sprechstatus."""
+    global is_talking_state
     
-    # ffplay command: -nodisp (no video window), -autoexit (exit after playing)
+    if not os.path.exists(file_path):
+        print(f"❌ Fehler: Audio-Datei nicht gefunden unter {file_path}")
+        return False
+
+    is_talking_state = True
+    
     try:
-        print(f"▶️ Playing audio for {duration_s:.2f}s via ffplay...")
         subprocess.run(
             ['ffplay', '-nodisp', '-autoexit', '-hide_banner', '-loglevel', 'error', file_path],
-            check=True, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        print("ffplay playback finished.")
-        return duration_s
-    except FileNotFoundError:
-        print("❌ Error: ffplay command not found. Please ensure ffmpeg is installed.")
-        return 0
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Error during ffplay playback: {e}")
-        return 0
-
-
-def apply_ring_modulation(input_file, output_file, frequency=80, depth=.5):
-    """
-    Applies a ring modulation effect to a WAV file.
-    
-    Args:
-        input_file (str): Path to the input WAV file.
-        output_file (str): Path to the output WAV file.
-        frequency (float): Modulator frequency in Hz.
-        depth (float): Intensity of the effect (0 to 1).
-    """
-    
-    # Load the audio file
-    rate, data = wav.read(input_file)
-    
-    # Ensure data is numpy array and handle stereo/mono
-    data = np.array(data)
-    if len(data.shape) > 1:
-        data = data[:, 0]  # Use only the first channel
-    
-    # Create a sine wave as the modulator
-    t = np.arange(len(data)) / rate
-    modulator = np.sin(2 * np.pi * frequency * t)
-    
-    # Scale the modulation with `depth`
-    modulated_data = (1 - depth) * data + depth * (data * modulator)
-    
-    # Normalize back into 16-bit integer values (assumed format)
-    int16_max = 32767.0
-    
-    # Normalize the modulated data to fit within the INT16 range
-    abs_max = np.max(np.abs(modulated_data))
-    if abs_max > 0:
-        scaling_factor = int16_max / abs_max
-    else:
-        scaling_factor = 1 
-        
-    modulated_data = np.int16(modulated_data * scaling_factor)
-    
-    # Save the new file
-    wav.write(output_file, rate, modulated_data)
-    print(f"Modulated audio saved to: {output_file}")
-
-
-def say_with_openai(text, voice="fable", model="tts-1"): 
-    """
-    Uses OpenAI TTS to convert text to speech, applies ring modulation, and plays it.
-    """
-    if not text or str(text).strip() == "":
-        print("say_with_openai: empty text provided, skipping TTS request")
-        return False
-
-    try:
-        if not OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is not set.")
-            
-        # 1. Generate MP3 from OpenAI
-        response = client.audio.speech.create(
-            model=model,
-            voice=voice,
-            input=text
-        )
-
-        with open(OPENAI_TTS_OUTPUT_MP3, "wb") as f:
-            f.write(response.content)
-
-        # 2. Convert MP3 to WAV using ffmpeg (NO pydub needed)
-        if not convert_mp3_to_wav_ffmpeg(OPENAI_TTS_OUTPUT_MP3, OPENAI_TTS_OUTPUT_WAV):
-            return False # Conversion failed
-        
-        # 3. Apply Ring Modulation
-        apply_ring_modulation(OPENAI_TTS_OUTPUT_WAV, MODULATED_OUTPUT_WAV)
-        
-        # 4. Play the modulated audio using ffplay (system utility)
-        duration = play_audio_ffplay(MODULATED_OUTPUT_WAV)
-        print(f"Playback finished (Duration: {duration}s)")
-
-        return duration > 0
+        return True
     except Exception as e:
-        print(f"Error in OpenAI TTS pipeline: {e}")
+        print(f"❌ Audio playback error: {e}")
         return False
     finally:
-        # Clean up temporary files
-        for f in [OPENAI_TTS_OUTPUT_MP3, OPENAI_TTS_OUTPUT_WAV, MODULATED_OUTPUT_WAV]:
-            if os.path.exists(f):
-                os.remove(f)
+        is_talking_state = False
 
-
-def speak_with_espeak(text_to_speak):
-    """Uses the local espeak command for playback."""
+def convert_mp3_to_wav_ffmpeg(input_mp3, output_wav):
+    """Konvertiert MP3 zu 44100Hz WAV (notwendig für die Ringmodulation)."""
     try:
-        subprocess.run(['espeak', '-v', 'de', '-s', '130', text_to_speak], 
-                       check=True, 
-                       stdout=subprocess.PIPE, 
-                       stderr=subprocess.PIPE)
-        return True, None
-    except subprocess.CalledProcessError as e:
-        return False, f"Espeak execution error: {e.stderr.decode()}"
-    except FileNotFoundError:
-        return False, "espeak command not found. Install with: sudo apt install espeak"
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', input_mp3, '-acodec', 'pcm_s16le', '-ar', '44100', output_wav],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        return True
     except Exception as e:
-        return False, f"Unknown error during espeak: {e}"
+        print(f"❌ MP3→WAV conversion error: {e}")
+        return False
+
+def apply_ring_modulation(input_file, output_file, frequency=80, depth=0.5):
+    """Wendet Ringmodulation auf die Audio-Daten an und speichert das Ergebnis."""
+    rate, data = wav.read(input_file)
+    data = np.array(data)
+    if len(data.shape) > 1:
+        data = data[:, 0]
+    t = np.arange(len(data)) / rate
+    modulator = np.sin(2 * np.pi * frequency * t)
+    modulated_data = (1 - depth) * data + depth * (data * modulator)
+    abs_max = np.max(np.abs(modulated_data)) or 1
+    scaling_factor = 32767.0 / abs_max
+    modulated_data = np.int16(modulated_data * scaling_factor)
+    wav.write(output_file, rate, modulated_data)
+
+# -------------------------
+# --- TTS IMPLEMENTATIONS ---
+# -------------------------
+
+def say_with_gtts(text, lang="de"):
+    """Generiert Audio mit gTTS, moduliert es und spielt es ab."""
+    if not text.strip():
+        print("Empty text, skipping TTS.")
+        return False
+        
+    hash_val = hashlib.sha256(text.encode('utf-8')).hexdigest()
+    temp_mp3_path = os.path.join(CACHE_DIR, f"gtts_{hash_val}.mp3")
+    temp_wav_path = os.path.join(CACHE_DIR, f"gtts_{hash_val}.wav")
+    
+    try:
+        print("⚙️ Generating TTS with gTTS...")
+        tts = gTTS(text=text, lang=lang, slow=False)
+        tts.save(temp_mp3_path)
+        
+        if not convert_mp3_to_wav_ffmpeg(temp_mp3_path, temp_wav_path):
+             return False
+             
+        # NEU: Modulation auf gTTS-Audio anwenden
+        apply_ring_modulation(temp_wav_path, MODULATED_OUTPUT_WAV)
+        
+        print("▶️ Playing modulated gTTS audio...")
+        return play_audio_ffplay(MODULATED_OUTPUT_WAV)
+
+    except Exception as e:
+        print(f"❌ gTTS error: {e}.")
+        return False
+    finally:
+        # Aufräumen der temporären Dateien
+        if os.path.exists(temp_mp3_path): os.remove(temp_mp3_path)
+        if os.path.exists(temp_wav_path): os.remove(temp_wav_path)
 
 
-def speak(text, mode="espeak"):
+def say_with_openai(text, voice="fable", model="tts-1"):
+    """Generiert Audio mit OpenAI TTS, cacht, moduliert und spielt ab."""
+    global openai_request_count
+    if not text.strip():
+        return False
+
+    text_hash = hash_text(text)
+    
+    # 1. Check cache
+    if text_hash in tts_cache_index:
+        wav_path = tts_cache_index[text_hash]["path"]
+        tts_cache_index[text_hash]["timestamp"] = time.time()
+        save_index()
+        print("✅ Playing cached audio.")
+        return play_audio_ffplay(wav_path)
+
+    # 2. Check if OpenAI limit reached
+    if openai_request_count >= MAX_OPENAI_REQUESTS:
+        print("⚠️ OpenAI request limit reached, falling back to espeak.")
+        return speak_with_espeak(text)[0] 
+
+    # 3. Generate TTS via OpenAI
+    mp3_path = os.path.join(CACHE_DIR, f"{text_hash}.mp3")
+    wav_path = os.path.join(CACHE_DIR, f"{text_hash}.wav")
+    try:
+        print("⚙️ Generating TTS with OpenAI...")
+        response = client.audio.speech.create(model=model, voice=voice, input=text)
+        
+        with open(mp3_path, "wb") as f:
+            f.write(response.content)
+        if not convert_mp3_to_wav_ffmpeg(mp3_path, wav_path):
+            return False
+
+        # Apply modulation to the temporary WAV file
+        apply_ring_modulation(wav_path, MODULATED_OUTPUT_WAV)
+        openai_request_count += 1
+
+        # Update cache (speichert Pfad zur modulierten Datei)
+        tts_cache_index[text_hash] = {"path": MODULATED_OUTPUT_WAV, "timestamp": time.time()}
+        prune_cache()
+        save_index()
+        
+        print("▶️ Playing modulated audio...")
+        return play_audio_ffplay(MODULATED_OUTPUT_WAV)
+    except Exception as e:
+        print(f"❌ OpenAI TTS error: {e}. Falling back to gTTS.")
+        # Fallback auf gTTS
+        return say_with_gtts(text, lang='de')
+    finally:
+        # Clean temp MP3/WAV
+        if os.path.exists(mp3_path): os.remove(mp3_path)
+        if os.path.exists(wav_path): os.remove(wav_path)
+
+
+# --- Local Espeak (SPIELT DIREKT AB) ---
+def speak_with_espeak(text, lang="de"):
+    """Uses the local espeak command for playback with specified language and updates status."""
+    global is_talking_state
+    
+    if not text.strip():
+        return False, None
+
+    is_talking_state = True
+    
+    try:
+        print("⚙️ Generating TTS with espeak...")
+        subprocess.run(['espeak', f'-v{lang}', '-s', '130', text],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True, None
+    except FileNotFoundError:
+        print("❌ Fehler: 'espeak' Programm nicht gefunden. Bitte installieren Sie es.")
+        return False, "espeak not found"
+    except Exception as e:
+        print(f"❌ espeak error: {e}")
+        return False, str(e)
+    finally:
+        is_talking_state = False
+
+
+def speak(text, mode="openai", lang="de", voice="fable"):
     """
-    Main entry point for the TTS service.
-    Mode 'espeak' uses local system, mode 'openai' uses cloud TTS with modulation.
+    Main entry point for TTS.
     """
-    print(f"🔊 Speaking Text: '{text}' using mode '{mode}'")
     if mode == "espeak":
-        return speak_with_espeak(text)
+        return speak_with_espeak(text, lang=lang)[0]
     elif mode == "openai":
-        return say_with_openai(text)
+        return say_with_openai(text, voice=voice)
+    elif mode == "gtts":
+        return say_with_gtts(text, lang=lang)
     else:
-        return False, f"Unknown TTS mode: {mode}"
+        print(f"❌ Unbekannter Modus {mode}")
+        return False
+
+# -------------------------
+# --- INIT ON IMPORT / TEST ---
+# -------------------------
 
 if __name__ == "__main__":
-    print("\n--- TTS Service Self-Test (Speaking) ---")
+    print("\n--- TTS Service Self-Test ---")
     
-    # --- 1. Test Espeak (Lokal) ---
-    print("\n1. Teste Modus 'espeak' (Lokal)....")
-    success, error = speak("Test der lokalen Sprachausgabe mit Espeak.", mode="espeak")
-    if success:
-        print("✅ Espeak Test erfolgreich.")
-    else:
-        print(f"❌ Espeak Test FEHLGESCHLAGEN: {error}")
+    import threading
+
+    if OPENAI_API_KEY:
+        # Test 1: OpenAI TTS (caching, modulation)
+        test_text_openai = "Hallo, ich bin PiBot. Ich verwende die Fable-Stimme und teste Caching."
+        print("\n[TEST 1] OpenAI TTS (mit Caching/Modulation)")
         
-    # --- 2. Test OpenAI (Cloud mit Modulation) ---
-    print("\n2. Teste Modus 'openai' (Cloud mit Ringmodulation)...")
-    if not os.getenv("OPENAI_API_KEY"):
-        print("⚠️ TEST-HINWEIS: OPENAI_API_KEY fehlt. OpenAI TTS wird übersprungen.")
+        # NEUE LÖSUNG: Cache-Eintrag für diesen Test-String löschen, um Konsistenz zu gewährleisten
+        test_hash = hash_text(test_text_openai)
+        if test_hash in tts_cache_index:
+            del tts_cache_index[test_hash]
+            save_index()
+            print("   -> Vorhandener Cache-Eintrag für Test-String wurde entfernt.")
+        
+        # Jetzt sollte der erste Aufruf GENERIEREN (was die Datei anlegt)
+        print("   -> Erster Aufruf (generiert):")
+        say_with_openai(test_text_openai, voice='fable')
+        
+        # Nun sollte der zweite Aufruf den Cache finden und verwenden
+        print("   -> Zweiter Aufruf (aus Cache):")
+        say_with_openai(test_text_openai, voice='fable')
+
+        # Test 2: gTTS und is_talking Statusprüfung (Polling-Methode)
+        test_text_gtts = "Dies ist ein Test mit gTTS und Ringmodulation."
+        print(f"\n[TEST 2] gTTS TTS und is_talking Statusprüfung")
+
+        # Starte die Wiedergabe in einem separaten Thread
+        t = threading.Thread(target=say_with_gtts, args=(test_text_gtts, 'de'))
+        t.start()
+
+        # Warten (Polling), bis der Status True ist, maximal 5 Sekunden
+        timeout = time.time() + 5  
+        while not get_talking_status() and time.time() < timeout:
+            time.sleep(0.1)  
+
+        # Prüfung 1: Status während Wiedergabe
+        status_during_playback = get_talking_status()
+        print(f"   Status während Wiedergabe: {status_during_playback}")
+        assert status_during_playback == True, "❌ is_talking wurde nicht auf True gesetzt."
+
+        t.join() 
+
+        # Prüfung 2: Status nach Wiedergabe
+        status_after_playback = get_talking_status()
+        print(f"   Status nach Wiedergabe: {status_after_playback}")
+        assert status_after_playback == False, "❌ is_talking wurde nicht auf False zurückgesetzt."
+
+        print(f"✅ TTS/gTTS und is_talking Test abgeschlossen.")
+
     else:
-        success = say_with_openai("Dies ist ein Test der roboterhaften Sprachausgabe über OpenAI.", voice="fable", model="tts-1")
-        if success:
-            print("✅ OpenAI TTS Test erfolgreich.")
-        else:
-            print("❌ OpenAI TTS Test FEHLGESCHLAGEN.")
-            
-    print("\n--- Test abgeschlossen ---")
+        print("❌ OPENAI_API_KEY nicht gesetzt. OpenAI/gTTS-Tests übersprungen.")
+    
+    
+    # Test 3: Espeak (unabhängig von OpenAI Key)
+    test_text_espeak = "Hallo, dies ist ein Test mit espeak."
+    print(f"\n[TEST 3] Espeak TTS und is_talking Statusprüfung")
+
+    # Starte die Wiedergabe in einem separaten Thread
+    t_espeak = threading.Thread(target=speak_with_espeak, args=(test_text_espeak, 'de'))
+    t_espeak.start()
+
+    # Warten (Polling), bis der Status True ist, maximal 5 Sekunden
+    timeout = time.time() + 5  
+    while not get_talking_status() and time.time() < timeout:
+        time.sleep(0.1)  
+
+    # Prüfung 1: Status während Wiedergabe
+    status_during_espeak = get_talking_status()
+    print(f"   Status während Wiedergabe: {status_during_espeak}")
+    assert status_during_espeak == True, "❌ Espeak is_talking wurde nicht auf True gesetzt."
+
+    t_espeak.join() 
+
+    # Prüfung 2: Status nach Wiedergabe
+    status_after_espeak = get_talking_status()
+    print(f"   Status nach Wiedergabe: {status_after_espeak}")
+    assert status_after_espeak == False, "❌ Espeak is_talking wurde nicht auf False zurückgesetzt."
+    print(f"✅ Espeak Test abgeschlossen.")
+
+
+    # Aufräumen der temporären modulierten Datei (falls vorhanden)
+    if os.path.exists(MODULATED_OUTPUT_WAV):
+        os.remove(MODULATED_OUTPUT_WAV)
