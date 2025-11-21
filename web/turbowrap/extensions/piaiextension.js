@@ -3,17 +3,6 @@
 // PiBot AI Extension für TurboWarp/Scratch 3.0
 //
 // ZIEL: Ermöglicht die Kommunikation zwischen Scratch und einem lokalen Python/Flask-Server (PiBot).
-//
-// FUNKTIONALITÄT:
-// 1. LLM-Kommunikation: 'ask LLM' sendet Prompt an den Server und gibt NUR die Textantwort zurück.
-// 2. TTS-Steuerung: 'speak' sendet Text, Modus (openai, espeak, gtts) und Sprache (lang) an den Server.
-// 3. Audioaufnahme: Startet/Stoppt die Aufnahme und transkribiert diese.
-// 4. Status/Konfiguration: Blöcke zur Steuerung der Systemnachricht, des LLM-Verlaufs und der Emotionen.
-//
-// NETZWERK-KONFIGURATION:
-// - Die Variable 'DEFAULT_SERVER_ORIGIN' nutzt 'window.location.origin', um die IP-Adresse und 
-//   den Port der aktuell geladenen Seite zu übernehmen. Dies gewährleistet eine stabile Verbindung
-//   unabhängig davon, ob der Zugriff über 127.0.0.1:5000 oder 192.168.50.1 erfolgt.
 // -------------------------------------------------------------------------------------------------
 
 (function(Scratch) {
@@ -27,8 +16,7 @@
             this.runtime = runtime;
             this._serverOrigin = DEFAULT_SERVER_ORIGIN;
             console.log(`PiAiExtension initialized. Server target: ${this._serverOrigin}`);
-			// Abonniert das interne Stopp-Ereignis der Scratch-Laufzeit
-            this.runtime.on(Scratch.events.PROJECT_STOP_ALL, this.handleProjectStop.bind(this));
+            // KEIN this.runtime.on(Scratch.events.PROJECT_STOP_ALL, ...) mehr.
         }
 
         getInfo() {
@@ -91,7 +79,7 @@
                     },
                     {
                         opcode: 'isTalking',
-                        blockType: Scratch.BlockType.BOOLEAN, 
+                        blockType: Scratch.BlockType.BOOLEAN, 
                         text: 'is PiBot talking?',
                     },
                     '---',
@@ -104,11 +92,10 @@
                             MESSAGE: {
                                 type: Scratch.ArgumentType.STRING,
                                 defaultValue: 'You are a helpful robot.',
-								multiline: true
+                                multiline: true
                             }
                         }
                     },
-
                     {
                         opcode: 'clearHistory',
                         blockType: Scratch.BlockType.COMMAND,
@@ -131,7 +118,6 @@
                         }
                     },
                     
-
                     {
                         opcode: 'getLastEmotion',
                         blockType: Scratch.BlockType.REPORTER,
@@ -144,7 +130,7 @@
                         arguments: {
                             EMOTION_LIST: {
                                 type: Scratch.ArgumentType.STRING,
-                                defaultValue: 'happy, sad, neutral' 
+                                defaultValue: 'happy, sad, neutral' 
                             }
                         }
                     },
@@ -153,19 +139,14 @@
                         blockType: Scratch.BlockType.REPORTER,
                         text: 'get allowed emotion list',
                     },
-					{
-                        opcode: 'onProjectStop', 
-                        blockType: Scratch.BlockType.HAT,
-                        text: 'when program stops',
-                    },
-
+                    // Der onProjectStop Hat-Block wurde entfernt.
                 ],
                 menus: {
                     TTS_MODE: {
                         acceptReporters: true,
                         items: ['openai', 'gtts', 'espeak']
                     },
-                    LANGUAGES: { 
+                    LANGUAGES: { 
                         acceptReporters: true,
                         items: ['de', 'en', 'fr', 'es']
                     }
@@ -249,7 +230,7 @@
         getHistory() {
             return new Promise(async (resolve) => {
                 // Ruft den Endpunkt /api/llm_history als GET-Anfrage auf
-                const data = await this.fetchGet('llm_history'); 
+                const data = await this.fetchGet('llm_history'); 
                 
                 if (data.error) {
                     resolve(`ERROR: ${data.error}`);
@@ -288,16 +269,16 @@
             const mode = Scratch.Cast.toString(args.MODE);
             const lang = Scratch.Cast.toString(args.LANG);
             
-            const payload = { 
-                text: text, 
-                mode: mode, 
-                lang: lang 
+            const payload = { 
+                text: text, 
+                mode: mode, 
+                lang: lang 
             };
             
             // Wenn der Modus 'openai' ist, muss der Server eine Standardstimme zuordnen,
             // da die Stimme nicht mehr im Block ausgewählt wird. Wir senden einen Default-Wert mit.
             if (mode === 'openai') {
-                 payload.voice = 'fable'; 
+                 payload.voice = 'fable'; 
             }
             
             return this.fetchPost('tts_speak', payload);
@@ -327,7 +308,7 @@
         isTalking() {
             return new Promise(async (resolve) => {
                 const data = await this.fetchGet('is_talking');
-                resolve(!!data.is_talking); 
+                resolve(!!data.is_talking); 
             });
         }
 
@@ -348,13 +329,12 @@
             return new Promise(async (resolve) => {
                 const data = await this.fetchGet('get_allowed_emotions');
                 if (data.emotions && Array.isArray(data.emotions)) {
-                    resolve(data.emotions.join(', ')); 
+                    resolve(data.emotions.join(', ')); 
                 } else {
                     resolve('Error or empty list');
                 }
             });
         }
-
     }
 
     Scratch.extensions.register(new PiAiExtension());
